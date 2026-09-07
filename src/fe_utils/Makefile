@@ -38,7 +38,8 @@ OBJS = \
 	recovery_gen.o \
 	simple_list.o \
 	string_utils.o \
-	version.o
+	version.o \
+	write_manifest.o
 
 ifeq ($(PORTNAME), win32)
 override CPPFLAGS += -DFD_SETSIZE=1024

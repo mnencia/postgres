@@ -2,10 +2,13 @@
  *
  * Write a new backup manifest.
  *
+ * The caller builds a manifest_wal_range list (fe_utils/write_manifest.h)
+ * and hands the head of that list to finalize_manifest().
+ *
  * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * src/bin/pg_combinebackup/write_manifest.c
+ * src/fe_utils/write_manifest.c
  *
  *-------------------------------------------------------------------------
  */
@@ -16,13 +19,13 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "access/xlogdefs.h"
 #include "common/checksum_helper.h"
 #include "common/file_perm.h"
 #include "common/logging.h"
+#include "fe_utils/write_manifest.h"
 #include "lib/stringinfo.h"
-#include "load_manifest.h"
 #include "mb/pg_wchar.h"
-#include "write_manifest.h"
 
 struct manifest_writer
 {
@@ -45,7 +48,7 @@ static size_t hex_encode(const uint8 *src, size_t len, char *dst);
  * in the specified directory.
  */
 manifest_writer *
-create_manifest_writer(char *directory, uint64 system_identifier)
+create_manifest_writer(const char *directory, uint64 system_identifier)
 {
 	manifest_writer *mwriter = pg_malloc_object(manifest_writer);
 

@@ -12,8 +12,8 @@
 #ifndef LOAD_MANIFEST_H
 #define LOAD_MANIFEST_H
 
-#include "access/xlogdefs.h"
 #include "common/checksum_helper.h"
+#include "fe_utils/write_manifest.h"
 
 /*
  * Each file described by the manifest file is parsed to produce an object
@@ -36,19 +36,6 @@ typedef struct manifest_file
 #define SH_RAW_ALLOCATOR	pg_malloc0
 #define SH_DECLARE
 #include "lib/simplehash.h"
-
-/*
- * Each WAL range described by the manifest file is parsed to produce an
- * object like this.
- */
-typedef struct manifest_wal_range
-{
-	TimeLineID	tli;
-	XLogRecPtr	start_lsn;
-	XLogRecPtr	end_lsn;
-	struct manifest_wal_range *next;
-	struct manifest_wal_range *prev;
-} manifest_wal_range;
 
 /*
  * All the data parsed from a backup_manifest file.

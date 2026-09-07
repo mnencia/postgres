@@ -27,8 +27,7 @@ OBJS = \
 	backup_label.o \
 	copy_file.o \
 	load_manifest.o \
-	reconstruct.o \
-	write_manifest.o
+	reconstruct.o
 
 all: pg_combinebackup
 

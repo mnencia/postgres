@@ -20,6 +20,7 @@
 #include "common/parse_manifest.h"
 #include "fe_utils/astreamer.h"
 #include "fe_utils/simple_list.h"
+#include "fe_utils/write_manifest.h"
 
 /*
  * Each file described by the manifest file is parsed to produce an object
@@ -55,19 +56,6 @@ typedef struct manifest_file
 #define SH_DECLARE
 #define SH_DEFINE
 #include "lib/simplehash.h"
-
-/*
- * Each WAL range described by the manifest file is parsed to produce an
- * object like this.
- */
-typedef struct manifest_wal_range
-{
-	TimeLineID	tli;
-	XLogRecPtr	start_lsn;
-	XLogRecPtr	end_lsn;
-	struct manifest_wal_range *next;
-	struct manifest_wal_range *prev;
-} manifest_wal_range;
 
 /*
  * All the data parsed from a backup_manifest file.
