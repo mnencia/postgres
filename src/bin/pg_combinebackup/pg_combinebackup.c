@@ -35,11 +35,11 @@
 #include "copy_file.h"
 #include "fe_utils/option_utils.h"
 #include "fe_utils/version.h"
+#include "fe_utils/write_manifest.h"
 #include "getopt_long.h"
 #include "lib/stringinfo.h"
 #include "load_manifest.h"
 #include "reconstruct.h"
-#include "write_manifest.h"
 
 /* Incremental file naming convention. */
 #define INCREMENTAL_PREFIX			"INCREMENTAL."

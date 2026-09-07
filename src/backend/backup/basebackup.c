@@ -225,6 +225,14 @@ static const struct exclude_list_item excludeFiles[] =
 	 */
 	{"backup_manifest", false},
 
+	/*
+	 * pg_upgrade_manifest describes the *old* cluster's own identity and
+	 * checkpoint (see src/bin/pg_upgrade/relfilenumber.c), not this one's;
+	 * carrying it into a backup of this cluster would leave every future
+	 * backup/standby holding a stale, unrelated record.
+	 */
+	{"pg_upgrade_manifest", false},
+
 	{"postmaster.pid", false},
 	{"postmaster.opts", false},
 

@@ -1,0 +1,466 @@
+<!--
+doc/src/sgml/ref/pg_upgrade_replica.sgml
+PostgreSQL documentation
+-->
+
+<refentry id="app-pgupgradereplica">
+ <indexterm zone="app-pgupgradereplica">
+  <primary>pg_upgrade_replica</primary>
+ </indexterm>
+
+ <refmeta>
+  <refentrytitle><application>pg_upgrade_replica</application></refentrytitle>
+  <manvolnum>1</manvolnum>
+  <refmiscinfo>Application</refmiscinfo>
+ </refmeta>
+
+ <refnamediv>
+  <refname>pg_upgrade_replica</refname>
+  <refpurpose>rebuild a standby's data directory against an already
+  <application>pg_upgrade</application>'d primary</refpurpose>
+ </refnamediv>
+
+ <refsynopsisdiv>
+  <cmdsynopsis>
+   <command>pg_upgrade_replica</command>
+   <arg rep="repeat"><replaceable>connection-option</replaceable></arg>
+   <arg choice="plain"><option>--old-bindir=<replaceable>directory</replaceable></option></arg>
+   <arg choice="plain"><option>--old-replica=<replaceable>directory</replaceable></option></arg>
+   <arg choice="plain"><option>--new-replica=<replaceable>directory</replaceable></option></arg>
+   <arg rep="repeat"><replaceable>option</replaceable></arg>
+  </cmdsynopsis>
+ </refsynopsisdiv>
+
+ <refsect1>
+  <title>Description</title>
+
+  <para>
+   <application>pg_upgrade_replica</application> rebuilds a physical
+   standby's data directory after <application>pg_upgrade</application>
+   has upgraded its primary, without re-cloning the whole dataset and
+   without <application>ssh</application> or <application>rsync</application>
+   access to either server's filesystem. It needs a libpq connection to
+   the new primary, read-only access to the standby's own pre-upgrade
+   data directory on the local machine it runs on, and a copy of
+   <application>pg_basebackup</application> and
+   <application>pg_combinebackup</application> from the same
+   installation (it locates and runs them as subprocesses, and refuses
+   to proceed if their version does not match its own).
+  </para>
+
+  <para>
+   <application>pg_upgrade</application> preserves the relfilenode of
+   every relation it transfers unchanged from the old cluster to the new
+   one, and (since it knows exactly which relations those are) records
+   that list in <filename>pg_upgrade_manifest</filename> inside the new
+   cluster's data directory, along with the old cluster's own identity
+   and shutdown checkpoint. This is a small format of its own, not a
+   <filename>backup_manifest</filename>: nothing but
+   <application>pg_upgrade_replica</application> itself ever reads it.
+   <application>pg_upgrade_replica</application> fetches that record
+   over the connection to the new primary and, for each relation it
+   lists, looks for that relation's own files on
+   <option>--old-replica</option> (pg_upgrade's own record is only an
+   inventory of what the old primary itself had, not a guarantee about
+   what a particular standby still does). Whatever it confirms is
+   actually still there becomes a forged, real
+   <filename>backup_manifest</filename>. It then runs
+   <application>pg_basebackup</application> <option>--incremental</option>
+   against that forged manifest to fetch only what has actually changed
+   on the new primary since its upgrade, and
+   <application>pg_combinebackup</application> to assemble the new
+   standby's data directory from that incremental backup and
+   <option>--old-replica</option>'s own files. Everything not listed in
+   the record -- freshly created relations, catalogs, configuration
+   files, and so on -- is part of the incremental backup and so is
+   always fetched fresh from the new primary.
+  </para>
+
+  <para>
+   <option>--old-replica</option>'s files are the only ones for which
+   this is true: once its own control data is confirmed to match the old
+   primary's exact shutdown checkpoint (see below), a block reported
+   unchanged since that checkpoint by the new primary's WAL summarizer is
+   taken on trust from <option>--old-replica</option>'s copy, with no
+   independent size or checksum check against the new primary, the same
+   trust any stopped <productname>PostgreSQL</productname> data
+   directory gets when starting recovery from it. Anything the WAL
+   summarizer reports as changed is fetched fresh instead of reused, and
+   the assembled standby's own recovery reconciles everything from
+   there forward, the same as after any other base backup.
+  </para>
+
+  <para>
+   This makes rebuilding a standby after <application>pg_upgrade</application>
+   proportional to how much actually changed, the same property
+   <application>pg_upgrade</application>'s own <option>--link</option>
+   and <option>--clone</option> modes already give the primary, instead
+   of proportional to the size of the whole dataset.
+  </para>
+ </refsect1>
+
+ <refsect1>
+  <title>Options</title>
+
+  <para>
+   <application>pg_upgrade_replica</application> accepts the following
+   command-line arguments:
+
+   <variablelist>
+    <varlistentry>
+     <term><option>--old-bindir=<replaceable class="parameter">directory</replaceable></option></term>
+     <listitem>
+      <para>
+       Directory containing the old cluster's own
+       <application>pg_controldata</application>, matching the
+       <productname>PostgreSQL</productname> version of the data in
+       <option>--old-replica</option> -- the same
+       <option>--old-bindir</option> given to
+       <application>pg_upgrade</application> for the same upgrade.
+       <application>pg_upgrade_replica</application> shells out to it to
+       read <option>--old-replica</option>'s own system identifier and
+       latest checkpoint location (see below): those live in
+       <filename>pg_control</filename>, whose binary layout is not
+       guaranteed stable across major versions, so this tool's own,
+       newer build cannot always parse an older cluster's copy of it
+       directly.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><option>--old-replica=<replaceable class="parameter">directory</replaceable></option></term>
+     <listitem>
+      <para>
+       The standby's own data directory, as it was before the primary's
+       <application>pg_upgrade</application> run. This directory is only
+       ever read, never written to, regardless of whether
+       <option>--link</option> is given.
+      </para>
+      <para>
+       This standby must have stayed connected and streaming from the old
+       primary through the primary's final, pre-upgrade shutdown, and
+       must not itself have been started again since. This is checked
+       automatically: <application>pg_upgrade_replica</application> reads
+       this directory's own <filename>pg_control</filename> and refuses
+       to proceed unless its system identifier and latest checkpoint
+       location exactly match what the manifest recorded for the old
+       primary. Without this check, a standby that fell behind before the
+       shutdown would have its reused files look valid while quietly
+       being stale, since replay against the new cluster never plays
+       backward to fill in what a lagging standby missed.
+      </para>
+      <para>
+       This standby must also itself be cleanly shut down before running
+       <application>pg_upgrade_replica</application>: its own checkpoint
+       only reaches <filename>pg_control</filename> that way, so a
+       standby left running (or killed) instead of shut down normally
+       would fail this check even if it had genuinely received
+       everything. <application>pg_upgrade_replica</application> refuses
+       to proceed if this directory's <filename>postmaster.pid</filename>
+       is still present.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><option>--new-replica=<replaceable class="parameter">directory</replaceable></option></term>
+     <listitem>
+      <para>
+       Where to assemble the new standby's data directory. Must not
+       already exist, or must be empty: this tool has no logic to resume
+       or merge with a previous attempt, so a partial or stale directory
+       left there would silently combine with the new run instead of
+       being rejected.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><option>--link</option></term>
+     <listitem>
+      <para>
+       Hardlink reused files from <option>--old-replica</option> instead
+       of copying them. This avoids doubling local disk space and I/O for
+       the bulk of the data, which matters at multi-terabyte scale, but
+       it means <option>--old-replica</option> and
+       <option>--new-replica</option> end up sharing inodes for those
+       files.
+      </para>
+      <para>
+       As with <application>pg_upgrade</application>'s own
+       <option>--link</option> mode, the first write the new standby ever
+       makes to a shared file corrupts the old replica's copy too, since
+       both directory entries point at the same physical blocks. Once the
+       new standby has been started, treat
+       <option>--old-replica</option> as consumed: do not start it again.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><option>--tablespace-mapping=<replaceable class="parameter">olddir</replaceable>=<replaceable class="parameter">newdir</replaceable></option></term>
+     <listitem>
+      <para>
+       Places the tablespace whose path on the new primary (as
+       <function>pg_tablespace_location()</function> reports it) is
+       <replaceable>olddir</replaceable> at <replaceable>newdir</replaceable>
+       on this host instead, the same <option>-T</option>
+       <replaceable>olddir</replaceable>=<replaceable>newdir</replaceable>
+       convention <application>pg_basebackup</application> and
+       <application>pg_combinebackup</application> already use. Without
+       a matching mapping, the default placement policy applies: reuse
+       <option>--old-replica</option>'s existing local path for a
+       tablespace that already existed before the upgrade, or fall back
+       to the new primary's own path for one created afterward (a guess
+       that only holds if this host's mount layout matches the
+       primary's). Both <replaceable>olddir</replaceable> and
+       <replaceable>newdir</replaceable> must be absolute paths. May be
+       given more than once, once per tablespace that needs an explicit
+       path. An in-place tablespace (one created with
+       <literal>LOCATION ''</literal>) has no absolute path to match
+       against in the first place, so no mapping can ever apply to one.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><option>--no-sync</option></term>
+     <listitem>
+      <para>
+       By default, <application>pg_upgrade_replica</application> will wait
+       for all files to be written safely to disk. This option causes it to
+       return without waiting, which is faster, but means that a subsequent
+       operating system crash can leave the assembled standby corrupt.
+       Generally, this option is useful for testing but should not be used
+       when assembling a standby for production use.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><option>-V</option></term>
+     <term><option>--version</option></term>
+     <listitem><para>Display version information, then exit.</para></listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><option>-?</option></term>
+     <term><option>--help</option></term>
+     <listitem><para>Show help, then exit.</para></listitem>
+    </varlistentry>
+   </variablelist>
+  </para>
+
+  <para>
+   <application>pg_upgrade_replica</application> also accepts the
+   following command-line arguments for connection parameters:
+
+   <variablelist>
+    <varlistentry>
+     <term><option>-d <replaceable class="parameter">dbname</replaceable></option></term>
+     <term><option>--dbname=<replaceable class="parameter">dbname</replaceable></option></term>
+     <listitem>
+      <para>
+       The database to connect to on the new primary. Its content is not
+       relevant: <application>pg_upgrade_replica</application> does not
+       access any particular database's own data, only server-wide
+       information and the new cluster's own files. Defaults to
+       <literal>postgres</literal>.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><option>-h <replaceable class="parameter">host</replaceable></option></term>
+     <term><option>--host=<replaceable class="parameter">host</replaceable></option></term>
+     <listitem>
+      <para>
+       Specifies the host name of the new primary.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><option>-p <replaceable class="parameter">port</replaceable></option></term>
+     <term><option>--port=<replaceable class="parameter">port</replaceable></option></term>
+     <listitem>
+      <para>
+       Specifies the TCP port the new primary is listening on.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><option>-U <replaceable class="parameter">username</replaceable></option></term>
+     <term><option>--username=<replaceable class="parameter">username</replaceable></option></term>
+     <listitem>
+      <para>
+       User name to connect as. This role needs two separate things,
+       neither of which alone is enough: the <literal>REPLICATION</literal>
+       role attribute (or superuser), since
+       <application>pg_upgrade_replica</application> drives
+       <application>pg_basebackup</application> over a replication
+       connection using these same credentials; and execute permission on
+       <function>pg_read_binary_file</function>, which is superuser-only
+       by default but can be granted to a non-superuser role (see Notes
+       below), to fetch <filename>pg_upgrade_manifest</filename> itself
+       over an ordinary connection. <filename>pg_hba.conf</filename> must
+       also permit a <literal>replication</literal> connection for this
+       role from this host.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><option>-w</option></term>
+     <term><option>--no-password</option></term>
+     <listitem>
+      <para>
+       Never issue a password prompt.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><option>-W</option></term>
+     <term><option>--password</option></term>
+     <listitem>
+      <para>
+       Force a password prompt.
+      </para>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+  </para>
+ </refsect1>
+
+ <refsect1>
+  <title>Notes</title>
+
+  <para>
+   A non-superuser role can be used in place of a superuser role,
+   provided it has both the <literal>REPLICATION</literal> attribute and
+   execute permission on <function>pg_read_binary_file</function> (the
+   same function-grant approach <application>pg_rewind</application>'s
+   own documentation shows). Here is how to create such a role, named
+   <literal>pg_upgrade_replica_user</literal> here, and permit it a
+   replication connection from this host:
+<programlisting>
+CREATE USER pg_upgrade_replica_user LOGIN REPLICATION;
+GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file(text) TO pg_upgrade_replica_user;
+</programlisting>
+<programlisting>
+# in pg_hba.conf on the new primary
+host    replication     pg_upgrade_replica_user     <replaceable>address</replaceable>          scram-sha-256
+</programlisting>
+   <function>pg_read_binary_file</function> takes an arbitrary file
+   path, not one confined to the new primary's data directory: granting
+   it delegates read access to any file the server process can read,
+   not just <filename>pg_upgrade_manifest</filename>, the only file
+   <application>pg_upgrade_replica</application> itself ever reads this
+   way.
+  </para>
+
+  <para>
+   This tool has no <option>sslmode</option> setting of its own; it
+   defers entirely to the connection string or environment, same as
+   <application>psql</application> or <application>pg_dump</application>.
+   Since a sync transfers a full copy of everything not already present
+   on <option>--old-replica</option>, consider
+   <literal>sslmode=verify-full</literal> if that matters for the network
+   path to the new primary.
+  </para>
+
+  <para>
+   The check against <option>--old-replica</option>'s control data only
+   establishes that it is not stale (caught up to the exact checkpoint
+   the manifest expects); it says nothing about whether its files are
+   authentic. Both the control data check and the page checksums a
+   cluster may have enabled are plain CRCs: anyone able to write to
+   <option>--old-replica</option> can reconstruct a control file and file
+   contents that pass both, the same way anyone able to write to the old
+   primary's own data directory could fool
+   <application>pg_upgrade</application> itself. Treat
+   <option>--old-replica</option> as trusted input, the same as any other
+   data directory <application>PostgreSQL</application> starts recovery
+   from, not as untrusted data this tool authenticates. This also covers
+   the more mundane case of accidental corruption (bitrot, a bad earlier
+   copy): an operator who wants that checked can run
+   <xref linkend="app-pgchecksums"/> <literal>--check</literal> against
+   <option>--old-replica</option> before running this tool, understanding
+   that it detects corruption, not tampering.
+  </para>
+
+  <para>
+   The assembled standby's <filename>backup_label</filename> is the one
+   <application>pg_basebackup</application> itself produces: its "start
+   WAL location" is wherever the new primary happened to be when
+   <application>pg_upgrade_replica</application> ran, not the older
+   checkpoint recorded in the forged manifest (that older checkpoint only
+   appears in the backup's own "incremental from" field, which
+   <application>pg_combinebackup</application> consumes and does not
+   carry into the final result). Recovery on the assembled standby
+   therefore replays forward from that recent point, not from whenever
+   <application>pg_upgrade</application> originally ran; a write made to
+   a relation reused from <option>--old-replica</option>, at any point
+   between the primary's post-upgrade restart and this tool actually
+   running, is already reflected directly in the assembled files, not
+   left for replay to backfill. There is no operational requirement to
+   retain WAL on the new primary for as long as some standby is still
+   waiting to be resynced.
+  </para>
+
+  <para>
+   What must be retained instead is WAL <emphasis>summary</emphasis>
+   coverage, which is a separate thing from WAL itself.
+   <xref linkend="guc-summarize-wal"/> must be enabled from the new
+   primary's very first post-upgrade startup: a coverage gap left before
+   turning it on is never backfilled, and
+   <application>pg_basebackup</application> <option>--incremental</option>
+   refuses to run against an incomplete range. The summaries themselves
+   are pruned after <xref linkend="guc-wal-summary-keep-time"/> (ten days
+   by default), so every standby needing this kind of resync must be
+   resynced within that window of the new primary's first startup, or
+   have <varname>wal_summary_keep_time</varname> raised accordingly.
+   Running past that window is not a silent correctness gap: it fails
+   plainly, with <application>pg_basebackup</application> reporting the
+   required summaries as incomplete, and the only way forward at that
+   point is a full re-clone.
+  </para>
+
+  <para>
+   If <application>pg_upgrade_replica</application> is interrupted after
+   <application>pg_combinebackup</application> finishes assembling
+   <option>--new-replica</option> but before it finishes writing
+   <filename>standby.signal</filename>, the result is a data directory
+   that looks complete (it has a <filename>backup_label</filename>) but
+   is not yet configured to recover as a standby: starting
+   <productname>PostgreSQL</productname> directly on it, without rerunning
+   this tool, would replay to consistency and come up as an independent
+   primary sharing the new primary's system identifier, rather than as a
+   standby. <application>pg_basebackup</application>
+   <option>-R</option> carries this same window using the same
+   underlying mechanism, just a much shorter one, since there is no
+   comparable step between the backup finishing and the recovery
+   configuration being written. Always confirm
+   <filename>standby.signal</filename> exists in
+   <option>--new-replica</option> before starting
+   <productname>PostgreSQL</productname> on it; if this tool was
+   interrupted, rerunning it (with <option>--new-replica</option>
+   cleared out first) is the only supported recovery.
+  </para>
+ </refsect1>
+
+ <refsect1>
+  <title>See Also</title>
+
+  <simplelist type="inline">
+   <member><xref linkend="pgupgrade"/></member>
+   <member><xref linkend="app-pgbasebackup"/></member>
+   <member><xref linkend="app-pgcombinebackup"/></member>
+   <member><xref linkend="app-pgrewind"/></member>
+  </simplelist>
+ </refsect1>
+
+</refentry>

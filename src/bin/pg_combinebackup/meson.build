@@ -6,7 +6,6 @@ pg_combinebackup_sources = files(
   'copy_file.c',
   'load_manifest.c',
   'reconstruct.c',
-  'write_manifest.c',
 )
 
 if host_system == 'windows'

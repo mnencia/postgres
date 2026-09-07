@@ -645,6 +645,16 @@ pg_upgrade.exe
      is running.
     </para>
 
+    <para>
+     If <application>rsync</application> or direct filesystem access to
+     the old and new clusters is not available, for example because the
+     primary and its standbys run in separate containers,
+     <xref linkend="app-pgupgradereplica"/> rebuilds a standby against the
+     new primary over a single connection instead, reusing the standby's
+     existing local files where <application>pg_upgrade</application>'s
+     own manifest says they are unchanged.
+    </para>
+
     <procedure>
 
      <step>

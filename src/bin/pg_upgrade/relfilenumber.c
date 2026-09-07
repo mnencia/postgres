@@ -19,6 +19,250 @@
 
 static void transfer_single_new_db(FileNameMap *maps, int size, char *old_tablespace, char *new_tablespace);
 static void transfer_relfile(FileNameMap *map, const char *type_suffix);
+static void cleanup_stale_upgrade_manifest(const char *new_pgdata);
+static void write_upgrade_manifest(const char *new_pgdata, FileNameMap *maps,
+								   int n_maps, char *old_tablespace);
+static void finalize_upgrade_manifest(const char *new_pgdata);
+
+/*
+ * append_new_cluster_checkpoint()
+ *
+ * Appends a "NEW_CHECKPOINT %X/%08X" line to the manifest with the new
+ * cluster's own final checkpoint location.
+ *
+ * Call only after the new cluster is stopped for the last time, and only
+ * after a fresh get_control_data() call for new_cluster: an earlier control
+ * data snapshot (e.g. the one from check_cluster_compatibility()) is from
+ * before this run's restore/transfer work, so it has the wrong checkpoint.
+ *
+ * pg_upgrade always leaves the new cluster cleanly stopped, so this
+ * checkpoint is real and already on disk. pg_resetwal guarantees it is past
+ * any LSN the old cluster ever wrote (see copy_xact_xlog_xid()'s "Resetting
+ * WAL archives" step). This lets a consumer start WAL replay from this
+ * checkpoint, with no live pg_backup_start()/pg_backup_stop() call needed,
+ * and still safely catch up on any write made to the new primary before the
+ * consumer got around to reading this manifest.
+ */
+void
+append_new_cluster_checkpoint(const char *new_pgdata)
+{
+	char		path[MAXPGPATH];
+	FILE	   *f;
+
+	snprintf(path, sizeof(path), "%s/%s", new_pgdata, UPGRADE_MANIFEST_FILE);
+
+	f = fopen(path, "ab");
+	if (f == NULL)
+		pg_fatal("could not open file \"%s\": %m", path);
+
+	fprintf(f, "NEW_CHECKPOINT %X/%08X\n",
+			(uint32) (new_cluster.controldata.chkpnt_loc >> 32),
+			(uint32) new_cluster.controldata.chkpnt_loc);
+
+	if (fclose(f) != 0)
+		pg_fatal("could not write file \"%s\": %m", path);
+
+	fsync_fname(path, false);
+}
+
+/*
+ * cleanup_stale_upgrade_manifest()
+ *
+ * Removes any pg_upgrade_manifest and .part.* fragments left over from an
+ * earlier, unfinished attempt against this same new_pgdata (see the
+ * fragment-file scheme in write_upgrade_manifest()'s comment). Call before
+ * any worker can write a fragment.
+ */
+static void
+cleanup_stale_upgrade_manifest(const char *new_pgdata)
+{
+	char		path[MAXPGPATH];
+	char		fragment_prefix[MAXPGPATH];
+	DIR		   *dir;
+	struct dirent *de;
+
+	snprintf(path, sizeof(path), "%s/%s", new_pgdata, UPGRADE_MANIFEST_FILE);
+	if (unlink(path) != 0 && errno != ENOENT)
+		pg_fatal("could not remove file \"%s\": %m", path);
+
+	snprintf(fragment_prefix, sizeof(fragment_prefix), "%s.part.",
+			 UPGRADE_MANIFEST_FILE);
+
+	dir = opendir(new_pgdata);
+	if (dir == NULL)
+		pg_fatal("could not open directory \"%s\": %m", new_pgdata);
+
+	while (errno = 0, (de = readdir(dir)) != NULL)
+	{
+		char		fragment_path[MAXPGPATH];
+
+		if (strncmp(de->d_name, fragment_prefix, strlen(fragment_prefix)) != 0)
+			continue;
+
+		snprintf(fragment_path, sizeof(fragment_path), "%s/%s",
+				 new_pgdata, de->d_name);
+		if (unlink(fragment_path) != 0)
+			pg_fatal("could not remove file \"%s\": %m", fragment_path);
+	}
+	if (errno)
+		pg_fatal("could not read directory \"%s\": %m", new_pgdata);
+	closedir(dir);
+}
+
+/*
+ * With --jobs > 1, transfer_all_new_tablespaces() runs one worker
+ * (process, or thread on Windows) per tablespace, all writing to the
+ * manifest at the same time. To avoid two workers writing the same file at
+ * once, write_upgrade_manifest() has each worker append only to its own
+ * fragment file, named by its pid (GetCurrentThreadId() on Windows, since
+ * --jobs there means threads, not processes). Once every worker is done,
+ * finalize_upgrade_manifest() joins all fragments into the real manifest
+ * and deletes them. cleanup_stale_upgrade_manifest() removes fragments
+ * left over from an earlier, unfinished run before a new run starts.
+ */
+
+/*
+ * write_upgrade_manifest()
+ *
+ * Appends this call's (db_oid, relfilenumber) pairs to this worker's
+ * manifest fragment (see the comment above).
+ *
+ * old_tablespace picks which entries of "maps" to write, using the same
+ * check transfer_single_new_db() uses to pick which files to transfer:
+ * gen_db_file_maps() returns every relation in the database regardless of
+ * tablespace, and with --jobs > 1 this function is called once per
+ * (database, tablespace) pair. Without this filter, every worker would
+ * write the database's whole, unfiltered relation list into its own
+ * fragment, and the joined manifest would hold one duplicate copy of the
+ * whole list per tablespace.
+ */
+static void
+write_upgrade_manifest(const char *new_pgdata, FileNameMap *maps, int n_maps,
+					   char *old_tablespace)
+{
+	char		path[MAXPGPATH];
+	FILE	   *f = NULL;
+
+	for (int i = 0; i < n_maps; i++)
+	{
+		if (old_tablespace != NULL &&
+			strcmp(maps[i].old_tablespace, old_tablespace) != 0)
+			continue;
+
+		if (f == NULL)
+		{
+			snprintf(path, sizeof(path), "%s/%s.part.%lu", new_pgdata,
+					 UPGRADE_MANIFEST_FILE,
+#ifdef WIN32
+					 (unsigned long) GetCurrentThreadId()
+#else
+					 (unsigned long) getpid()
+#endif
+				);
+
+			f = fopen(path, "ab");
+			if (f == NULL)
+				pg_fatal("could not open file \"%s\": %m", path);
+		}
+
+		/*
+		 * Only the two integers, nothing else: nspname/relname are SQL
+		 * identifiers and can contain a literal newline, which would break
+		 * this line-based format.
+		 */
+		fprintf(f, "%u %u\n", maps[i].db_oid, maps[i].relfilenumber);
+	}
+
+	if (f != NULL && fclose(f) != 0)
+		pg_fatal("could not write file \"%s\": %m", path);
+}
+
+/*
+ * finalize_upgrade_manifest()
+ *
+ * Writes the manifest header: old cluster's system identifier and
+ * checkpoint location. A consumer needs these to check that its local copy
+ * of the old cluster (e.g. a standby's data directory) was caught up to
+ * this exact checkpoint before trusting any "unchanged" file listed here.
+ * Without that check, a replica lagging behind the old primary's last
+ * checkpoint would keep serving stale data forever, since replay against
+ * the new cluster only ever moves forward from the new checkpoint.
+ *
+ * Then appends every worker's fragment (see the comment above
+ * write_upgrade_manifest()) into the real pg_upgrade_manifest and deletes
+ * the fragments.
+ *
+ * Call only after every worker has been reaped: fragments are private to
+ * one worker until this point, so this function and the workers must never
+ * run at the same time.
+ *
+ * append_new_cluster_checkpoint() adds a further NEW_CHECKPOINT line later,
+ * once the new cluster has been stopped for the last time and its final
+ * checkpoint is known.
+ */
+static void
+finalize_upgrade_manifest(const char *new_pgdata)
+{
+	char		path[MAXPGPATH];
+	char		fragment_prefix[MAXPGPATH];
+	FILE	   *f;
+	DIR		   *dir;
+	struct dirent *de;
+
+	snprintf(path, sizeof(path), "%s/%s", new_pgdata, UPGRADE_MANIFEST_FILE);
+	snprintf(fragment_prefix, sizeof(fragment_prefix), "%s.part.",
+			 UPGRADE_MANIFEST_FILE);
+
+	f = fopen(path, "wb");
+	if (f == NULL)
+		pg_fatal("could not open file \"%s\": %m", path);
+
+	fprintf(f, "PG_UPGRADE_MANIFEST 1 " UINT64_FORMAT " %X/%08X\n",
+			old_cluster.controldata.sysid,
+			(uint32) (old_cluster.controldata.chkpnt_loc >> 32),
+			(uint32) old_cluster.controldata.chkpnt_loc);
+
+	dir = opendir(new_pgdata);
+	if (dir == NULL)
+		pg_fatal("could not open directory \"%s\": %m", new_pgdata);
+
+	while (errno = 0, (de = readdir(dir)) != NULL)
+	{
+		char		fragment_path[MAXPGPATH];
+		FILE	   *frag;
+		char		buf[8192];
+		size_t		nread;
+
+		if (strncmp(de->d_name, fragment_prefix, strlen(fragment_prefix)) != 0)
+			continue;
+
+		snprintf(fragment_path, sizeof(fragment_path), "%s/%s",
+				 new_pgdata, de->d_name);
+
+		frag = fopen(fragment_path, "rb");
+		if (frag == NULL)
+			pg_fatal("could not open file \"%s\": %m", fragment_path);
+		while ((nread = fread(buf, 1, sizeof(buf), frag)) > 0)
+		{
+			if (fwrite(buf, 1, nread, f) != nread)
+				pg_fatal("could not write file \"%s\": %m", path);
+		}
+		if (ferror(frag))
+			pg_fatal("could not read file \"%s\": %m", fragment_path);
+		fclose(frag);
+
+		if (unlink(fragment_path) != 0)
+			pg_fatal("could not remove file \"%s\": %m", fragment_path);
+	}
+	if (errno)
+		pg_fatal("could not read directory \"%s\": %m", new_pgdata);
+	closedir(dir);
+
+	if (fclose(f) != 0)
+		pg_fatal("could not write file \"%s\": %m", path);
+
+	fsync_fname(path, false);
+}
 
 /*
  * The following set of sync_queue_* functions are used for --swap to reduce
@@ -108,6 +352,8 @@ void
 transfer_all_new_tablespaces(DbInfoArr *old_db_arr, DbInfoArr *new_db_arr,
 							 char *old_pgdata, char *new_pgdata)
 {
+	cleanup_stale_upgrade_manifest(new_pgdata);
+
 	switch (user_opts.transfer_mode)
 	{
 		case TRANSFER_MODE_CLONE:
@@ -157,6 +403,13 @@ transfer_all_new_tablespaces(DbInfoArr *old_db_arr, DbInfoArr *new_db_arr,
 			;
 	}
 
+	/*
+	 * Safe only now: every worker that could have called
+	 * write_upgrade_manifest() has been reaped, so there's no longer any
+	 * concurrent writer to race against.
+	 */
+	finalize_upgrade_manifest(new_pgdata);
+
 	end_progress_output();
 	check_ok();
 }
@@ -204,6 +457,7 @@ transfer_all_new_dbs(DbInfoArr *old_db_arr, DbInfoArr *new_db_arr,
 
 		mappings = gen_db_file_maps(old_db, new_db, &n_maps, old_pgdata,
 									new_pgdata);
+		write_upgrade_manifest(new_pgdata, mappings, n_maps, old_tablespace);
 		if (n_maps)
 		{
 			transfer_single_new_db(mappings, n_maps, old_tablespace, new_tablespace);

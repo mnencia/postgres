@@ -19,6 +19,7 @@ fe_utils_sources = files(
   'simple_list.c',
   'string_utils.c',
   'version.c',
+  'write_manifest.c',
 )
 
 psqlscan = custom_target('psqlscan',

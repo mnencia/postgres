@@ -63,6 +63,8 @@ get_control_data(ClusterInfo *cluster)
 	bool		got_data_checksum_version = false;
 	bool		got_cluster_state = false;
 	bool		got_default_char_signedness = false;
+	bool		got_sysid = false;
+	bool		got_chkpnt = false;
 	char	   *lc_collate = NULL;
 	char	   *lc_ctype = NULL;
 	char	   *lc_monetary = NULL;
@@ -165,6 +167,33 @@ get_control_data(ClusterInfo *cluster)
 						pg_fatal("The target cluster was not shut down cleanly, state reported as: \"%s\"", p);
 				}
 				got_cluster_state = true;
+			}
+			else if ((p = strstr(bufin, "Database system identifier:")) != NULL)
+			{
+				p = strchr(p, ':');
+
+				if (p == NULL || strlen(p) <= 1)
+					pg_fatal("%d: controldata retrieval problem", __LINE__);
+
+				p++;			/* remove ':' char */
+				cluster->controldata.sysid = strtou64(p, NULL, 10);
+				got_sysid = true;
+			}
+			else if ((p = strstr(bufin, "Latest checkpoint location:")) != NULL)
+			{
+				uint32		hi;
+				uint32		lo;
+
+				p = strchr(p, ':');
+
+				if (p == NULL || strlen(p) <= 1)
+					pg_fatal("%d: controldata retrieval problem", __LINE__);
+
+				p++;			/* remove ':' char */
+				if (sscanf(p, "%X/%X", &hi, &lo) != 2)
+					pg_fatal("%d: controldata retrieval problem", __LINE__);
+				cluster->controldata.chkpnt_loc = ((uint64) hi) << 32 | lo;
+				got_chkpnt = true;
 			}
 		}
 
@@ -531,7 +560,8 @@ get_control_data(ClusterInfo *cluster)
 		!got_large_object ||
 		!got_date_is_int || !got_data_checksum_version ||
 		(!got_default_char_signedness &&
-		 cluster->controldata.cat_ver >= DEFAULT_CHAR_SIGNEDNESS_CAT_VER))
+		 cluster->controldata.cat_ver >= DEFAULT_CHAR_SIGNEDNESS_CAT_VER) ||
+		(!live_check && (!got_sysid || !got_chkpnt)))
 	{
 		if (cluster == &old_cluster)
 			pg_log(PG_REPORT,
@@ -601,6 +631,12 @@ get_control_data(ClusterInfo *cluster)
 		/* value added in Postgres 18 */
 		if (!got_default_char_signedness)
 			pg_log(PG_REPORT, "  default char signedness");
+
+		if (!live_check && !got_sysid)
+			pg_log(PG_REPORT, "  database system identifier");
+
+		if (!live_check && !got_chkpnt)
+			pg_log(PG_REPORT, "  latest checkpoint location");
 
 		pg_fatal("Cannot continue without required control information, terminating");
 	}

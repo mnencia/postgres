@@ -199,6 +199,17 @@ if ($Config{osname} ne 'darwin')
 	close $file;
 }
 
+# pg_upgrade_manifest (see src/bin/pg_upgrade/relfilenumber.c) describes
+# the *old* cluster's own identity and checkpoint, not this one's, so it
+# must never ride along into a backup of this cluster: create a dummy one
+# here to confirm the exclusion below actually reaches it, rather than
+# relying only on pg_upgrade itself ever having produced one.
+{
+	open my $file, '>>', "$pgdata/pg_upgrade_manifest" or die $!;
+	print $file "DONOTCOPY";
+	close $file;
+}
+
 # Connect to a database to create global/pg_internal.init.  If this is removed
 # the test to ensure global/pg_internal.init is not copied will return a false
 # positive.
@@ -267,7 +278,7 @@ foreach my $dirname (
 # These files should not be copied.
 foreach my $filename (
 	qw(postgresql.auto.conf.tmp postmaster.opts postmaster.pid tablespace_map current_logfiles.tmp
-	global/pg_internal.init global/pg_internal.init.123))
+	global/pg_internal.init global/pg_internal.init.123 pg_upgrade_manifest))
 {
 	ok(!-f "$tempdir/backup/$filename", "$filename not copied");
 }
