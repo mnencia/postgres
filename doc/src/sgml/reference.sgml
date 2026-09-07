@@ -294,6 +294,7 @@
    &pgtestfsync;
    &pgtesttiming;
    &pgupgrade;
+   &pgupgradereplica;
    &pgwaldump;
    &pgwalsummary;
    &postgres;

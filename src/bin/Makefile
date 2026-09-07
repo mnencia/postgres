@@ -29,6 +29,7 @@ SUBDIRS = \
 	pg_test_fsync \
 	pg_test_timing \
 	pg_upgrade \
+	pg_upgrade_replica \
 	pg_verifybackup \
 	pg_waldump \
 	pg_walsummary \
