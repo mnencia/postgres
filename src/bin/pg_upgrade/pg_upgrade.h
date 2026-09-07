@@ -31,6 +31,24 @@
 #define DB_DUMP_FILE_MASK	"pg_upgrade_dump_%u.custom"
 
 /*
+ * Written inside the new cluster's PGDATA: a small format of its own (not a
+ * backup_manifest -- nothing but pg_upgrade_replica ever reads this file)
+ * listing which relations were transferred unchanged from the old cluster.
+ * A header line carries the old cluster's own system identifier and
+ * shutdown checkpoint; one "db_oid relfilenumber" line follows per relation
+ * transferred unchanged; a trailing line, appended once known, carries the
+ * new cluster's own post-restore checkpoint. Anything not listed here is
+ * new content produced by this pg_upgrade run (system catalogs, etc).
+ *
+ * This only covers the main fork and, when present, the fsm and vm forks
+ * (the same suffixes transfer_relfile() ever moves); it says nothing about
+ * an unlogged relation's init fork, which pg_upgrade never transfers at
+ * all -- it's created fresh by the new cluster's own DDL replay, whether
+ * or not the relation's other forks are listed here as kept.
+ */
+#define UPGRADE_MANIFEST_FILE	"pg_upgrade_manifest"
+
+/*
  * Base directories that include all the files generated internally, from the
  * root path of the new cluster.  The paths are dynamically built as of
  * BASE_OUTPUTDIR/$timestamp/{LOG_OUTPUTDIR,DUMP_OUTPUTDIR} to ensure their
@@ -234,6 +252,8 @@ typedef struct
 	bool		float8_pass_by_value;
 	uint32		data_checksum_version;
 	bool		default_char_signedness;
+	uint64		sysid;
+	uint64		chkpnt_loc;
 } ControlData;
 
 /*
@@ -439,6 +459,7 @@ void		transfer_all_new_tablespaces(DbInfoArr *old_db_arr,
 void		transfer_all_new_dbs(DbInfoArr *old_db_arr,
 								 DbInfoArr *new_db_arr, char *old_pgdata, char *new_pgdata,
 								 char *old_tablespace, char *new_tablespace);
+void		append_new_cluster_checkpoint(const char *new_pgdata);
 
 /* tablespace.c */
 

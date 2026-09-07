@@ -622,6 +622,29 @@ command_ok(
 ok( !-d $newnode->data_dir . "/pg_upgrade_output.d",
 	"pg_upgrade_output.d/ removed after pg_upgrade success");
 
+# pg_upgrade_manifest lists every relation file transferred unchanged, for
+# a standby-resync client to consume later; check its format independent
+# of any such client, since nothing else in this file exercises it. It's a
+# small, purpose-built line format (see relfilenumber.c): a header line with
+# the old cluster's own identity and shutdown checkpoint, one "db_oid
+# relfilenumber" line per relation transferred unchanged, and a trailing
+# NEW_CHECKPOINT line with the new cluster's own post-restore checkpoint.
+my $manifest_path = $newnode->data_dir . "/pg_upgrade_manifest";
+ok(-f $manifest_path, "pg_upgrade_manifest exists in the new cluster");
+
+my $manifest_contents = slurp_file($manifest_path);
+like(
+	$manifest_contents,
+	qr/^PG_UPGRADE_MANIFEST 1 \d+ [0-9A-Fa-f]+\/[0-9A-Fa-f]+$/m,
+	"pg_upgrade_manifest has a version-1 header with the old cluster's identity"
+);
+like($manifest_contents, qr/^\d+ \d+$/m,
+	"pg_upgrade_manifest lists at least one unchanged relation");
+like(
+	$manifest_contents,
+	qr/^NEW_CHECKPOINT [0-9A-Fa-f]+\/[0-9A-Fa-f]+$/m,
+	"pg_upgrade_manifest has the new cluster's checkpoint");
+
 $newnode->start;
 
 # Check if there are any logs coming from pg_upgrade, that would only be

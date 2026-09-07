@@ -254,6 +254,17 @@ main(int argc, char **argv)
 
 	issue_warnings_and_set_wal_level();
 
+	/*
+	 * The control data captured earlier, in check_cluster_compatibility(), is
+	 * for the freshly-initdb'd cluster, before this run's restore and
+	 * transfer steps. issue_warnings_and_set_wal_level() just did one more
+	 * start/stop cycle to fix wal_level, which produced a later shutdown
+	 * checkpoint. Re-read control data now, after every start/stop pg_upgrade
+	 * does, so the checkpoint recorded below is the final one.
+	 */
+	get_control_data(&new_cluster);
+	append_new_cluster_checkpoint(new_cluster.pgdata);
+
 	pg_log(PG_REPORT,
 		   "\n"
 		   "Upgrade Complete\n"
